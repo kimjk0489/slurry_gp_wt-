@@ -55,11 +55,11 @@ bounds = torch.stack([
 ])
 
 # ✅ equality 제약조건: 정규화된 조성들의 실제 합이 100이 되도록
-scales = bounds_array[:, 1] - bounds_array[:, 0]  # 각 변수 스케일
+scales = bounds_array[:, 1] - bounds_array[:, 0]
 offset = np.sum(bounds_array[:, 0])
 rhs = 100.0 - offset
 
-indices = torch.arange(len(x_cols), dtype=torch.long)  # [0, 1, 2, 3]
+indices = torch.arange(len(x_cols), dtype=torch.long)
 coefficients = torch.tensor(scales, dtype=torch.double)
 rhs_tensor = torch.tensor(rhs, dtype=torch.double)
 
@@ -68,38 +68,49 @@ inequality_constraints = [
     (indices, -coefficients, -rhs_tensor),
 ]
 
-candidate_wt = None  # 추천 조성 초기화
+candidate_wt = None
 
 # 8. 버튼을 눌렀을 때 추천 수행
-if st.button("candidate"):
+if st.button("Candidate"):
     best_y = train_y.max()
     acq_fn = LogExpectedImprovement(model=model, best_f=best_y, maximize=True)
 
-    candidate_scaled, _ = optimize_acqf(
-        acq_function=acq_fn,
-        bounds=bounds,
-        q=1,
-        num_restarts=10,
-        raw_samples=100,
-        inequality_constraints=inequality_constraints,
-    )
+    y_pred = -float("inf")
+    for attempt in range(5):
+        candidate_scaled, _ = optimize_acqf(
+            acq_function=acq_fn,
+            bounds=bounds,
+            q=1,
+            num_restarts=10,
+            raw_samples=100,
+            inequality_constraints=inequality_constraints,
+        )
+        candidate_np = candidate_scaled.detach().numpy()
+        candidate_temp = denormalize(candidate_np, bounds_array)[0]
 
-    candidate_np = candidate_scaled.detach().numpy()
-    candidate_wt = denormalize(candidate_np, bounds_array)[0]
+        x_norm = normalize(candidate_temp.reshape(1, -1), bounds_array)
+        x_tensor = torch.tensor(x_norm, dtype=torch.double)
+        y_pred = model.posterior(x_tensor).mean.item()
 
-    # 9. 추천 결과 출력
-    st.subheader("candidate")
-    for i, col in enumerate(x_cols):
-        st.write(f"{col}: **{candidate_wt[i]:.2f} wt%**")
-    st.write(f"**총합**: {np.sum(candidate_wt):.2f} wt%")
+        if y_pred > 0:
+            candidate_wt = candidate_temp
+            break
 
-# 10. Carbon Black 변화에 따른 예측 곡선
-carbon_black_index = x_cols.index("carbon_black_wt%")
+    if candidate_wt is not None:
+        st.subheader("Candidate")
+        for i, col in enumerate(x_cols):
+            st.write(f"{col}: **{candidate_wt[i]:.2f} wt%**")
+        st.write(f"**총합**: {np.sum(candidate_wt):.2f} wt%")
+        st.write(f"**예측 Yield Stress**: {y_pred:.2f} Pa")
+    else:
+        st.warning("Yield Stress > 0 조건을 만족하는 추천 조성을 찾지 못했습니다.")
+
+# 9. Carbon Black 변화에 따른 예측 곡선
+dx = x_cols.index("carbon_black_wt%")
 x_vals = np.linspace(0, 1, 100)
-
 mean_scaled = np.mean(X_scaled, axis=0)
 X_test_scaled = np.tile(mean_scaled, (100, 1))
-X_test_scaled[:, carbon_black_index] = x_vals
+X_test_scaled[:, dx] = x_vals
 X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.double)
 
 model.eval()
@@ -108,18 +119,21 @@ with torch.no_grad():
     mean = posterior.mean.numpy().flatten()
     std = posterior.variance.sqrt().numpy().flatten()
 
-carbon_black_vals_wt = denormalize(X_test_scaled, bounds_array)[:, carbon_black_index]
-train_x_wt = denormalize(train_x.numpy(), bounds_array)[:, carbon_black_index]
+carbon_black_vals_wt = denormalize(X_test_scaled, bounds_array)[:, dx]
+train_x_wt = denormalize(train_x.numpy(), bounds_array)[:, dx]
 train_y_np = train_y.numpy().flatten()
 
-# 11. 그래프 출력
+# 10. 그래프 출력
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(carbon_black_vals_wt, mean, label="Predicted Mean", color="blue")
 ax.fill_between(carbon_black_vals_wt, mean - 1.96 * std, mean + 1.96 * std, color="blue", alpha=0.2, label="95% CI")
 ax.scatter(train_x_wt, train_y_np, color="red", label="Observed Data")
 if candidate_wt is not None:
-    ax.scatter(candidate_wt[0], model.posterior(torch.tensor([normalize(np.array(candidate_wt).reshape(1, -1), bounds_array)], dtype=torch.double)).mean.item(),
-               color="yellow", label="candidate")
+    ax.scatter(
+        candidate_wt[0],
+        model.posterior(torch.tensor([normalize(np.array(candidate_wt).reshape(1, -1), bounds_array)], dtype=torch.double)).mean.item(),
+        color="yellow", label="Candidate"
+    )
 ax.set_xlabel("Carbon Black [wt%]")
 ax.set_ylabel("Yield Stress [Pa]")
 ax.set_title("GP Prediction")
