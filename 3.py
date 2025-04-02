@@ -10,7 +10,7 @@ from botorch.acquisition.analytic import LogExpectedImprovement
 from botorch.optim import optimize_acqf
 
 st.set_page_config(page_title="Carbon Black Optimization", layout="wide")
-st.title("Carbon Black 조성 최적화 (합 = 100%, 개별 범위 설정)")
+st.title("Slurry 조성 최적화 GP")
 
 # 1. 데이터 불러오기
 df = pd.read_csv("slurry_data_wt%.csv")
@@ -71,7 +71,7 @@ inequality_constraints = [
 candidate_wt = None  # 추천 조성 초기화
 
 # 8. 버튼을 눌렀을 때 추천 수행
-if st.button("조성 추천 실행"):
+if st.button("candidate"):
     best_y = train_y.max()
     acq_fn = LogExpectedImprovement(model=model, best_f=best_y, maximize=True)
 
@@ -88,7 +88,7 @@ if st.button("조성 추천 실행"):
     candidate_wt = denormalize(candidate_np, bounds_array)[0]
 
     # 9. 추천 결과 출력
-    st.subheader("📌 최적 조성 (wt%)")
+    st.subheader("candidate")
     for i, col in enumerate(x_cols):
         st.write(f"{col}: **{candidate_wt[i]:.2f} wt%**")
     st.write(f"**총합**: {np.sum(candidate_wt):.2f} wt%")
