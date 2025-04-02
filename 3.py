@@ -68,6 +68,8 @@ inequality_constraints = [
     (indices, -coefficients, -rhs_tensor),
 ]
 
+candidate_wt = None  # 추천 조성 초기화
+
 # 8. 버튼을 눌렀을 때 추천 수행
 if st.button("조성 추천 실행"):
     best_y = train_y.max()
@@ -115,9 +117,12 @@ fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(carbon_black_vals_wt, mean, label="Predicted Mean", color="blue")
 ax.fill_between(carbon_black_vals_wt, mean - 1.96 * std, mean + 1.96 * std, color="blue", alpha=0.2, label="95% CI")
 ax.scatter(train_x_wt, train_y_np, color="red", label="Observed Data")
+if candidate_wt is not None:
+    ax.scatter(candidate_wt[0], model.posterior(torch.tensor([normalize(np.array(candidate_wt).reshape(1, -1), bounds_array)], dtype=torch.double)).mean.item(),
+               color="yellow", label="candidate")
 ax.set_xlabel("Carbon Black [wt%]")
 ax.set_ylabel("Yield Stress [Pa]")
-ax.set_title("GP Prediction vs Carbon Black (합 = 100 wt%)")
+ax.set_title("GP Prediction")
 ax.grid(True)
 ax.legend()
 st.pyplot(fig)
