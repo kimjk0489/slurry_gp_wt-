@@ -13,44 +13,52 @@ from botorch.optim import optimize_acqf
 st.set_page_config(page_title="Slurry 조성 최적화 GP", layout="wide")
 st.title("Slurry 조성 최적화 GP")
 
-# 1. 데이터 불러오기
 CSV_PATH = "slurry_data_wt%_ALL.csv"
-df = pd.read_csv(CSV_PATH)
+try:
+    df = pd.read_csv(CSV_PATH)
+except FileNotFoundError:
+    df = pd.DataFrame(columns=["carbon_black_wt%", "graphite_wt%", "CMC_wt%", "solvent_wt%", "yield_stress"])
 
-# 2. 사용자 입력: 사이드바로 새로운 조성 추가
-st.sidebar.header("📥 새로운 실험 조성 추가")
+# --- 사용자 입력 폼 (Graphite 자동 계산) ---
+st.sidebar.header("새로운 실험 조성 추가")
 with st.sidebar.form("new_data_form"):
-    new_cb = st.number_input("Carbon Black [wt%]", step=0.1)
-    new_graphite = st.number_input("Graphite [wt%]", step=0.1)
-    new_cmc = st.number_input("CMC [wt%]", step=0.05)
-    new_solvent = st.number_input("Solvent [wt%]", step=0.5)
-    new_yield = st.number_input("Yield Stress [Pa]", step=10.0)
+    new_cb = st.number_input("Carbon Black [wt%]", min_value=0.0, step=0.1)
+    new_cmc = st.number_input("CMC [wt%]", min_value=0.0, step=0.05)
+    new_solvent = st.number_input("Solvent [wt%]", min_value=0.0, step=0.5)
+
+    total_input = new_cb + new_cmc + new_solvent
+    new_graphite = max(0.0, 100.0 - total_input)  # 음수 방지
+    st.markdown(f"Graphite: **{new_graphite:.2f} wt%**")
+
+    new_yield = st.number_input("Yield Stress [Pa]", min_value=0.0, step=10.0)
     submitted = st.form_submit_button("데이터 추가")
 
 if submitted:
-    new_row = {
-        "carbon_black_wt%": new_cb,
-        "graphite_wt%": new_graphite,
-        "CMC_wt%": new_cmc,
-        "solvent_wt%": new_solvent,
-        "yield_stress": new_yield,
-    }
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df.to_csv(CSV_PATH, index=False)
-    st.sidebar.success("✅ 데이터가 저장되었습니다.")
+    if total_input > 100:
+        st.sidebar.error("⚠️ Carbon Black + CMC + Solvent의 합이 100을 초과했습니다.")
+    else:
+        new_row = {
+            "carbon_black_wt%": new_cb,
+            "graphite_wt%": new_graphite,
+            "CMC_wt%": new_cmc,
+            "solvent_wt%": new_solvent,
+            "yield_stress": new_yield,
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        df.to_csv(CSV_PATH, index=False)
+        st.sidebar.success("✅ 데이터가 저장되었습니다.")
 
-# 3. 입력/출력 설정
+# --- 데이터 전처리 ---
 x_cols = ["carbon_black_wt%", "graphite_wt%", "CMC_wt%", "solvent_wt%"]
 y_cols = ["yield_stress"]
 X_raw = df[x_cols].values
 Y_raw = df[y_cols].values
 
-# 4. 정규화 범위 정의
 param_bounds = {
     "carbon_black_wt%": (1.75, 10.0),
-    "graphite_wt%":     (18.0, 38.0),
-    "CMC_wt%":          (0.7, 1.5),
-    "solvent_wt%":      (58.0, 78.0),
+    "graphite_wt%": (18.0, 38.0),
+    "CMC_wt%": (0.7, 1.5),
+    "solvent_wt%": (58.0, 78.0),
 }
 bounds_array = np.array([param_bounds[k] for k in x_cols])
 x_scaler = MinMaxScaler()
@@ -60,34 +68,33 @@ X_scaled = x_scaler.transform(X_raw)
 train_x = torch.tensor(X_scaled, dtype=torch.double)
 train_y = torch.tensor(Y_raw, dtype=torch.double)
 
-# 5. GP 모델 학습
+# --- 모델 학습 ---
 model = SingleTaskGP(train_x, train_y)
 mll = ExactMarginalLogLikelihood(model.likelihood, model)
 fit_gpytorch_mll(mll)
 
-# 6. 제약조건 설정
+# --- 제약조건 설정 ---
 input_dim = train_x.shape[1]
 bounds = torch.tensor([[0.0] * input_dim, [1.0] * input_dim], dtype=torch.double)
-
 scales = bounds_array[:, 1] - bounds_array[:, 0]
 offset = np.sum(bounds_array[:, 0])
 rhs = 100.0 - offset
 indices = torch.arange(len(x_cols), dtype=torch.long)
 coefficients = torch.tensor(scales, dtype=torch.double)
 rhs_tensor = torch.tensor(rhs, dtype=torch.double)
-
 inequality_constraints = [
     (indices, coefficients, rhs_tensor),
     (indices, -coefficients, -rhs_tensor),
 ]
 
-candidate_wt = None
 
-# 중복 확인 함수
+# --- 중복 확인 ---
 def is_duplicate(candidate_scaled, train_scaled, tol=1e-3):
     return any(np.allclose(candidate_scaled, x, atol=tol) for x in train_scaled)
 
-# 7. 추천 버튼 누르면 수행
+
+# --- 추천 실행 ---
+candidate_wt = None
 if st.button("Candidate"):
     best_y = train_y.max().item()
     acq_fn = ExpectedImprovement(model=model, best_f=best_y, maximize=True)
@@ -120,7 +127,7 @@ if st.button("Candidate"):
     else:
         st.warning("Yield Stress > 0 조건을 만족하는 조성을 찾지 못했습니다.")
 
-# 8. Carbon Black 변화에 따른 예측 시각화
+# --- 예측 곡선 시각화 ---
 cb_idx = x_cols.index("carbon_black_wt%")
 x_vals_scaled = np.linspace(0, 1, 100)
 mean_scaled = np.mean(X_scaled, axis=0)
