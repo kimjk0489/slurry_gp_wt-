@@ -10,19 +10,42 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.acquisition.analytic import ExpectedImprovement
 from botorch.optim import optimize_acqf
 
-st.set_page_config(page_title="Carbon Black Optimization", layout="wide")
+st.set_page_config(page_title="Slurry 조성 최적화 GP", layout="wide")
 st.title("Slurry 조성 최적화 GP")
 
 # 1. 데이터 불러오기
-df = pd.read_csv("slurry_data_wt%.csv")
+CSV_PATH = "slurry_data_wt%_ALL.csv"
+df = pd.read_csv(CSV_PATH)
 
-# 2. 입력/출력 설정
+# 2. 사용자 입력: 사이드바로 새로운 조성 추가
+st.sidebar.header("📥 새로운 실험 조성 추가")
+with st.sidebar.form("new_data_form"):
+    new_cb = st.number_input("Carbon Black [wt%]", step=0.1)
+    new_graphite = st.number_input("Graphite [wt%]", step=0.1)
+    new_cmc = st.number_input("CMC [wt%]", step=0.05)
+    new_solvent = st.number_input("Solvent [wt%]", step=0.5)
+    new_yield = st.number_input("Yield Stress [Pa]", step=10.0)
+    submitted = st.form_submit_button("데이터 추가")
+
+if submitted:
+    new_row = {
+        "carbon_black_wt%": new_cb,
+        "graphite_wt%": new_graphite,
+        "CMC_wt%": new_cmc,
+        "solvent_wt%": new_solvent,
+        "yield_stress": new_yield,
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    df.to_csv(CSV_PATH, index=False)
+    st.sidebar.success("✅ 데이터가 저장되었습니다.")
+
+# 3. 입력/출력 설정
 x_cols = ["carbon_black_wt%", "graphite_wt%", "CMC_wt%", "solvent_wt%"]
 y_cols = ["yield_stress"]
 X_raw = df[x_cols].values
 Y_raw = df[y_cols].values
 
-# 3. param_bounds 정의 및 MinMaxScaler 설정
+# 4. 정규화 범위 정의
 param_bounds = {
     "carbon_black_wt%": (1.75, 10.0),
     "graphite_wt%":     (18.0, 38.0),
@@ -33,7 +56,6 @@ bounds_array = np.array([param_bounds[k] for k in x_cols])
 x_scaler = MinMaxScaler()
 x_scaler.fit(bounds_array.T)
 
-# 4. 정규화 + 텐서 변환
 X_scaled = x_scaler.transform(X_raw)
 train_x = torch.tensor(X_scaled, dtype=torch.double)
 train_y = torch.tensor(Y_raw, dtype=torch.double)
@@ -65,12 +87,12 @@ candidate_wt = None
 def is_duplicate(candidate_scaled, train_scaled, tol=1e-3):
     return any(np.allclose(candidate_scaled, x, atol=tol) for x in train_scaled)
 
-# 7. 최적 조성 추천
+# 7. 추천 버튼 누르면 수행
 if st.button("Candidate"):
     best_y = train_y.max().item()
     acq_fn = ExpectedImprovement(model=model, best_f=best_y, maximize=True)
 
-    for attempt in range(10):
+    for _ in range(10):
         candidate_scaled, _ = optimize_acqf(
             acq_function=acq_fn,
             bounds=bounds,
@@ -80,10 +102,8 @@ if st.button("Candidate"):
             inequality_constraints=inequality_constraints,
         )
         candidate_np = candidate_scaled.detach().numpy()[0]
-
         if is_duplicate(candidate_np, train_x.numpy()):
             continue
-
         x_tensor = torch.tensor(candidate_np.reshape(1, -1), dtype=torch.double)
         y_pred = model.posterior(x_tensor).mean.item()
 
@@ -100,7 +120,7 @@ if st.button("Candidate"):
     else:
         st.warning("Yield Stress > 0 조건을 만족하는 조성을 찾지 못했습니다.")
 
-# 8. Carbon Black 변화에 따른 예측 그래프
+# 8. Carbon Black 변화에 따른 예측 시각화
 cb_idx = x_cols.index("carbon_black_wt%")
 x_vals_scaled = np.linspace(0, 1, 100)
 mean_scaled = np.mean(X_scaled, axis=0)
