@@ -3,6 +3,7 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -21,41 +22,30 @@ y_cols = ["yield_stress"]
 X_raw = df[x_cols].values
 Y_raw = df[y_cols].values
 
-# 3. 실험 DOE 기반 + 확장된 범위
+# 3. param_bounds 정의 및 MinMaxScaler 설정
 param_bounds = {
     "carbon_black_wt%": (1.75, 10.0),
+    "graphite_wt%":     (18.0, 38.0),
     "CMC_wt%":          (0.7, 1.5),
     "solvent_wt%":      (58.0, 78.0),
-    "graphite_wt%":     (18.0, 38.0),
 }
+bounds_array = np.array([param_bounds[k] for k in x_cols])
+x_scaler = MinMaxScaler()
+x_scaler.fit(bounds_array.T)
 
-# 4. 정규화/역정규화 함수
-def normalize(X, bounds_array):
-    return (X - bounds_array[:, 0]) / (bounds_array[:, 1] - bounds_array[:, 0])
-
-def denormalize(X_scaled, bounds_array):
-    return X_scaled * (bounds_array[:, 1] - bounds_array[:, 0]) + bounds_array[:, 0]
-
-def is_duplicate(candidate, existing, tol=1e-3):
-    return any(np.allclose(candidate, x, atol=tol) for x in existing)
-
-# 5. bounds array 생성
-bounds_array = np.array([param_bounds[key] for key in x_cols])
-X_scaled = normalize(X_raw, bounds_array)
+# 4. 정규화 + 텐서 변환
+X_scaled = x_scaler.transform(X_raw)
 train_x = torch.tensor(X_scaled, dtype=torch.double)
 train_y = torch.tensor(Y_raw, dtype=torch.double)
 
-# 6. GP 모델 학습
+# 5. GP 모델 학습
 model = SingleTaskGP(train_x, train_y)
 mll = ExactMarginalLogLikelihood(model.likelihood, model)
 fit_gpytorch_mll(mll)
 
-# 7. 제약조건 설정
+# 6. 제약조건 설정
 input_dim = train_x.shape[1]
-bounds = torch.stack([
-    torch.zeros(input_dim, dtype=torch.double),
-    torch.ones(input_dim, dtype=torch.double)
-])
+bounds = torch.tensor([[0.0] * input_dim, [1.0] * input_dim], dtype=torch.double)
 
 scales = bounds_array[:, 1] - bounds_array[:, 0]
 offset = np.sum(bounds_array[:, 0])
@@ -71,7 +61,11 @@ inequality_constraints = [
 
 candidate_wt = None
 
-# 8. 최적 조성 추천
+# 중복 확인 함수
+def is_duplicate(candidate_scaled, train_scaled, tol=1e-3):
+    return any(np.allclose(candidate_scaled, x, atol=tol) for x in train_scaled)
+
+# 7. 최적 조성 추천
 if st.button("Candidate"):
     best_y = train_y.max().item()
     acq_fn = ExpectedImprovement(model=model, best_f=best_y, maximize=True)
@@ -90,12 +84,11 @@ if st.button("Candidate"):
         if is_duplicate(candidate_np, train_x.numpy()):
             continue
 
-        x_norm = candidate_np.reshape(1, -1)
-        x_tensor = torch.tensor(x_norm, dtype=torch.double)
+        x_tensor = torch.tensor(candidate_np.reshape(1, -1), dtype=torch.double)
         y_pred = model.posterior(x_tensor).mean.item()
 
         if y_pred > 0:
-            candidate_wt = denormalize(x_norm, bounds_array)[0]
+            candidate_wt = x_scaler.inverse_transform(candidate_np.reshape(1, -1))[0]
             break
 
     if candidate_wt is not None:
@@ -107,12 +100,12 @@ if st.button("Candidate"):
     else:
         st.warning("Yield Stress > 0 조건을 만족하는 조성을 찾지 못했습니다.")
 
-# 9. Carbon Black 변화에 따른 예측 그래프
+# 8. Carbon Black 변화에 따른 예측 그래프
 cb_idx = x_cols.index("carbon_black_wt%")
-x_vals = np.linspace(0, 1, 100)
+x_vals_scaled = np.linspace(0, 1, 100)
 mean_scaled = np.mean(X_scaled, axis=0)
 X_test_scaled = np.tile(mean_scaled, (100, 1))
-X_test_scaled[:, cb_idx] = x_vals
+X_test_scaled[:, cb_idx] = x_vals_scaled
 X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.double)
 
 model.eval()
@@ -121,8 +114,8 @@ with torch.no_grad():
     mean = posterior.mean.numpy().flatten()
     std = posterior.variance.sqrt().numpy().flatten()
 
-cb_vals_wt = denormalize(X_test_scaled, bounds_array)[:, cb_idx]
-train_x_cb = denormalize(train_x.numpy(), bounds_array)[:, cb_idx]
+cb_vals_wt = x_scaler.inverse_transform(X_test_scaled)[:, cb_idx]
+train_x_cb = x_scaler.inverse_transform(train_x.numpy())[:, cb_idx]
 train_y_np = train_y.numpy().flatten()
 
 fig, ax = plt.subplots(figsize=(10, 5))
@@ -130,9 +123,9 @@ ax.plot(cb_vals_wt, mean, label="Predicted Mean", color="blue")
 ax.fill_between(cb_vals_wt, mean - 1.96 * std, mean + 1.96 * std, color="blue", alpha=0.2, label="95% CI")
 ax.scatter(train_x_cb, train_y_np, color="red", label="Observed Data")
 if candidate_wt is not None:
-    x_cand_norm = normalize(np.array(candidate_wt).reshape(1, -1), bounds_array)
-    y_cand = model.posterior(torch.tensor(x_cand_norm, dtype=torch.double)).mean.item()
-    ax.scatter(candidate_wt[0], y_cand, color="yellow", label="Candidate")
+    cand_scaled = x_scaler.transform(candidate_wt.reshape(1, -1))
+    pred_y = model.posterior(torch.tensor(cand_scaled, dtype=torch.double)).mean.item()
+    ax.scatter(candidate_wt[cb_idx], pred_y, color="yellow", label="Candidate")
 
 ax.set_xlabel("Carbon Black [wt%]")
 ax.set_ylabel("Yield Stress [Pa]")
