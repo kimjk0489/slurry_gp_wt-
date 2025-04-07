@@ -145,6 +145,18 @@ cb_vals_wt = x_scaler.inverse_transform(X_test_scaled)[:, cb_idx]
 train_x_cb = x_scaler.inverse_transform(train_x.numpy())[:, cb_idx]
 train_y_np = train_y.numpy().flatten()
 
+st.sidebar.header("데이터 삭제")
+
+if not df.empty:
+    delete_idx = st.sidebar.selectbox("삭제할 행 (index)", options=df.index)
+    if st.sidebar.button("행 삭제"):
+        df = df.drop(delete_idx).reset_index(drop=True)
+        df.to_csv(CSV_PATH, index=False)
+        st.sidebar.success(f"✅ {delete_idx}번 행이 삭제되었습니다.")
+else:
+    st.sidebar.info("삭제할 데이터가 없습니다.")
+
+
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(cb_vals_wt, mean, label="Predicted Mean", color="blue")
 ax.fill_between(cb_vals_wt, mean - 1.96 * std, mean + 1.96 * std, color="blue", alpha=0.2, label="95% CI")
